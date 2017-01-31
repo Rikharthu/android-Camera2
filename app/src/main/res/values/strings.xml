@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Camera 2</string>
+    <string name="video_button_description">Video Record Button</string>
+    <string name="camera_button_description">Camera Capture Button</string>
+</resources>
