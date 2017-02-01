@@ -16,6 +16,7 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
@@ -84,8 +85,19 @@ public class MainActivity extends AppCompatActivity {
         public void onOpened(CameraDevice camera) {
             Log.d(LOG_TAG, "connected to camera");
             mCameraDevice = camera;
-            // start the preview
-            startPreview();
+            if (mIsRecording) {
+                // marshmallow permission check onPause shit
+                try {
+                    createVideoFileName();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                startRecording();
+                mMediaRecorder.start();
+            }else{
+                // start the preview
+                startPreview();
+            }
         }
 
         @Override
@@ -101,8 +113,10 @@ public class MainActivity extends AppCompatActivity {
         }
     };
     private CaptureRequest.Builder mCaptureRequestBuilder;
+    private MediaRecorder mMediaRecorder;
     private String mCameraId;
     private Size mPreviewSize;
+    private Size mVideoSize;
     private HandlerThread mBackgroundHandlerThread;
     private Handler mBackgroundHandler;
     private ImageButton mRecordImageButton;
@@ -119,6 +133,8 @@ public class MainActivity extends AppCompatActivity {
         ORIENTATIONS.append(Surface.ROTATION_270, 270);
     }
 
+    private int mTotalRotation;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -127,8 +143,9 @@ public class MainActivity extends AppCompatActivity {
 
         createVideoFolder();
 
-        mTextureView = (TextureView) findViewById(R.id.textureView);
+        mMediaRecorder = new MediaRecorder();
 
+        mTextureView = (TextureView) findViewById(R.id.textureView);
         mRecordImageButton = (ImageButton) findViewById(R.id.videoOnlineImageButton);
         mRecordImageButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -136,8 +153,11 @@ public class MainActivity extends AppCompatActivity {
                 if (mIsRecording) {
                     mIsRecording = false;
                     mRecordImageButton.setImageResource(R.mipmap.btn_video_online);
+                    stopRecording();
+                    startPreview();
                 } else {
                     checkWriteStoragePermission();
+                    startRecording();
                 }
             }
         });
@@ -194,7 +214,7 @@ public class MainActivity extends AppCompatActivity {
             } else {
 
             }
-        }else if(requestCode == PERMISSION_REQUEST_WRITE_EXTERNAL) {
+        } else if (requestCode == PERMISSION_REQUEST_WRITE_EXTERNAL) {
             if (grantResults.length != 1 || grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 // permission granted
                 mIsRecording = true;
@@ -204,7 +224,7 @@ public class MainActivity extends AppCompatActivity {
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
-            }else{
+            } else {
                 Toast.makeText(this, "App need to save videos", Toast.LENGTH_SHORT).show();
             }
         }
@@ -222,7 +242,7 @@ public class MainActivity extends AppCompatActivity {
                 CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
                 // skip front-facing camera
                 if (characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT) {
-                    Log.d(LOG_TAG_SETUP_CAMERA, "camera " + cameraId + " is fron facing -> skipping");
+                    Log.d(LOG_TAG_SETUP_CAMERA, "camera " + cameraId + " is front facing -> skipping");
                     continue;
                 }
                 Log.d(LOG_TAG_SETUP_CAMERA, "camera: " + cameraId + " is facing back -> OK");
@@ -235,8 +255,8 @@ public class MainActivity extends AppCompatActivity {
                 // TODO не понятно
                 int deviceOrientation = getWindowManager().getDefaultDisplay().getRotation();
                 Log.d(LOG_TAG_SETUP_CAMERA, "device orientation: " + ORIENTATIONS.get(deviceOrientation));
-                int totalRotation = sensorToDeviceRotation(characteristics, deviceOrientation);
-                boolean swapRotation = totalRotation == 90 || totalRotation == 270; // we are in portrait mode => swap width and height
+                mTotalRotation = sensorToDeviceRotation(characteristics, deviceOrientation);
+                boolean swapRotation = mTotalRotation == 90 || mTotalRotation == 270; // we are in portrait mode => swap width and height
                 // 90+90=180 => no need to swap, 0+90=90 => camera in landscape, device in portraitn => swap
                 int rotatedWidth = width;
                 int rotatedHeight = height;
@@ -249,6 +269,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 // choose surface preview size to be closest to the camera preview size while maintaining aspect ratio
                 mPreviewSize = chooseOptimalSize(map.getOutputSizes(SurfaceTexture.class), rotatedWidth, rotatedHeight);
+                mVideoSize = chooseOptimalSize(map.getOutputSizes(MediaRecorder.class), rotatedWidth, rotatedHeight);
                 Log.d(LOG_TAG_SETUP_CAMERA, "preview size: " + mPreviewSize.toString());
 
                 // get first rear-facing camera
@@ -287,6 +308,55 @@ public class MainActivity extends AppCompatActivity {
             e.printStackTrace();
         }
 
+    }
+
+    private void startRecording() {
+        Log.d(LOG_TAG, "starting recording");
+        try {
+            setupMediaRecorder();
+            SurfaceTexture surfaceTextre = mTextureView.getSurfaceTexture();
+            surfaceTextre.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
+            Surface previewSurface = new Surface(surfaceTextre);
+            Surface recordSurface = mMediaRecorder.getSurface();
+            // create capture builder request
+            mCaptureRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+            mCaptureRequestBuilder.addTarget(previewSurface);
+            // also add record surface
+            mCaptureRequestBuilder.addTarget(recordSurface);
+            mCameraDevice.createCaptureSession(Arrays.asList(previewSurface, recordSurface),
+                    new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(CameraCaptureSession session) {
+                            Log.d(LOG_TAG, "camera recording session configured");
+
+                            try {
+                                // loop a recording request
+                                session.setRepeatingRequest(mCaptureRequestBuilder.build(),
+                                        null, // callback
+                                        null); // null because mediarecorder has it's own thread
+                            } catch (CameraAccessException e) {
+                                e.printStackTrace();
+                            }
+                        }
+
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession session) {
+                            Log.d(LOG_TAG, "unable to setup camera recording session");
+                        }
+                    },
+                    null);
+            mMediaRecorder.start();
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    private void stopRecording() {
+        mMediaRecorder.stop();
+        mMediaRecorder.reset();
     }
 
     private void startPreview() {
@@ -414,13 +484,14 @@ public class MainActivity extends AppCompatActivity {
         File videoFile = File.createTempFile(prepend, "mp4", mVideoFolder);
         // FIXME maybe move this assignment somewhere else?
         mVideoFileName = videoFile.getAbsolutePath();
+        Log.d(LOG_TAG,"video file name: "+mVideoFileName);
         return videoFile;
     }
 
-    private void checkWriteStoragePermission(){
+    private void checkWriteStoragePermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if(ContextCompat.checkSelfPermission(this,Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                    == PackageManager.PERMISSION_GRANTED){
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    == PackageManager.PERMISSION_GRANTED) {
                 mIsRecording = true;
                 mRecordImageButton.setImageResource(R.mipmap.btn_video_busy);
                 try {
@@ -428,14 +499,15 @@ public class MainActivity extends AppCompatActivity {
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
-            }else{
+//                startRecording();
+            } else {
                 // ask for permission
-                if(shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)){
+                if (shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
                     Toast.makeText(this, "This app needs to be able to save videos", Toast.LENGTH_SHORT).show();
                 }
                 requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, PERMISSION_REQUEST_WRITE_EXTERNAL);
             }
-        }else{
+        } else {
             mIsRecording = true;
             mRecordImageButton.setImageResource(R.mipmap.btn_video_busy);
             try {
@@ -444,6 +516,22 @@ public class MainActivity extends AppCompatActivity {
                 e.printStackTrace();
             }
         }
+    }
+
+    /**
+     * configure media recorder (inputs, formats, outputs, fps)
+     */
+    private void setupMediaRecorder() throws IOException {
+        Log.d(LOG_TAG, "ssetting up media recorder");
+        mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+        mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+        mMediaRecorder.setOutputFile(mVideoFileName);
+        mMediaRecorder.setVideoEncodingBitRate(1000000);
+        mMediaRecorder.setVideoFrameRate(30);
+        mMediaRecorder.setVideoSize(mVideoSize.getWidth(), mVideoSize.getHeight());
+        mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+        mMediaRecorder.setOrientationHint(mTotalRotation);
+        mMediaRecorder.prepare();
     }
 
     /**
