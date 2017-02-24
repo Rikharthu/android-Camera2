@@ -1,4 +1,4 @@
-package com.example.android.camera2;
+package com.uberv.android.camera2;
 
 import android.Manifest;
 import android.app.Activity;
@@ -7,7 +7,12 @@ import android.app.DialogFragment;
 import android.app.Fragment;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.graphics.ImageFormat;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -15,27 +20,40 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.Image;
+import android.media.ImageReader;
 import android.media.MediaRecorder;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 import android.support.annotation.NonNull;
+import android.support.design.widget.Snackbar;
 import android.support.v4.content.ContextCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.Size;
 import android.util.SparseIntArray;
+import android.view.Gravity;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
+import android.widget.Chronometer;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -49,8 +67,14 @@ public class MainActivity extends AppCompatActivity {
     public static final String LOG_TAG_SETUP_CAMERA = "Camera Setup";
     private static final int PERMISSION_REQUEST_CAMERA = 0;
     private static final String FRAGMENT_DIALOG = "dialog";
-    private static final String VIDEO_FOLDER_NAME = "Camera2VideoImage";
+    // represents this app's folder name
+    private static final String VIDEO_IMAGE_FOLDER_NAME = "Camera2VideoImage";
     private static final int PERMISSION_REQUEST_WRITE_EXTERNAL = 1;
+    // camera capture states
+    public static final int STATE_PREVIEW = 0;
+    public static final int STATE_WAIT_LOCK = 1;
+
+    private int mCaptureState = STATE_PREVIEW;
 
     private TextureView mTextureView;
     private TextureView.SurfaceTextureListener mSurfaceTextureListener = new TextureView.SurfaceTextureListener() {
@@ -79,6 +103,8 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    private View mRootLayout;
+
     private CameraDevice mCameraDevice;
     private CameraDevice.StateCallback mCameraDeviceStateCallback = new CameraDevice.StateCallback() {
         @Override
@@ -94,7 +120,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 startRecording();
                 mMediaRecorder.start();
-            }else{
+            } else {
                 // start the preview
                 startPreview();
             }
@@ -113,15 +139,108 @@ public class MainActivity extends AppCompatActivity {
         }
     };
     private CaptureRequest.Builder mCaptureRequestBuilder;
+    private CameraCaptureSession mPreviewCaptureSession;
+    private CameraCaptureSession.CaptureCallback mPreviewCaptureCallback = new CameraCaptureSession.CaptureCallback() {
+
+        private void process(CaptureResult captureResult) {
+            switch (mCaptureState) {
+                case STATE_PREVIEW:
+                    // Do nothing
+                    break;
+                case STATE_WAIT_LOCK:
+                    // we have order to capture image
+                    Integer afState = captureResult.get(CaptureResult.CONTROL_AF_STATE);
+                    if (afState == CaptureRequest.CONTROL_AF_STATE_FOCUSED_LOCKED  // focus locked successfully
+                            || afState == CaptureRequest.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) // no autofocus supported
+                    {
+                        Toast.makeText(MainActivity.this, "AF Locked!", Toast.LENGTH_SHORT).show();
+                        // focus configured, start image capture
+                        startStillCaptureRequest();
+                        // we sent request to capture image => reset state
+                        mCaptureState = STATE_PREVIEW;
+                    }
+                    break;
+            }
+        }
+
+        @Override
+        public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
+            Log.d(LOG_TAG, "onCaptureCompleted()");
+            super.onCaptureCompleted(session, request, result);
+            process(result);
+        }
+    };
     private MediaRecorder mMediaRecorder;
+    private Chronometer mChronometer;
     private String mCameraId;
     private Size mPreviewSize;
     private Size mVideoSize;
+    private Size mImageSize;
+    private ImageReader mImageReader;
+    private final ImageReader.OnImageAvailableListener mOnImageAvailableListener = new ImageReader.OnImageAvailableListener() {
+        @Override
+        public void onImageAvailable(ImageReader imageReader) {
+            Log.d(LOG_TAG, "mOnImageAvailableListener.onImageAvailable()");
+            mBackgroundHandler.post(new ImageSaver(imageReader.acquireLatestImage()));
+        }
+    };
+
+    private class ImageSaver implements Runnable {
+
+        private final Image image;
+
+        public ImageSaver(Image image) {
+            this.image = image;
+        }
+
+        @Override
+        public void run() {
+            Log.d(LOG_TAG, "ImageSaver.run()");
+            ByteBuffer byteBuffer = image.getPlanes()[0].getBuffer();
+            byte[] bytes = new byte[byteBuffer.remaining()];
+            byteBuffer.get(bytes);
+            // TODO create a bitmap
+
+            FileOutputStream fos = null;
+            try {
+                fos = new FileOutputStream(mImageFileName);
+                fos.write(bytes);
+                // FIXME for debug purposes:
+                // attelu apstrade
+//                for(int i =0;i<image.getWidth();i++){
+//                    bytes[i]= 3;
+//                }
+                Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                Log.d(LOG_TAG,"attelu apstrade done");
+            } catch (FileNotFoundException e) {
+                e.printStackTrace();
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                image.close();
+
+                if (fos != null) {
+                    try {
+                        fos.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+                Log.d(LOG_TAG,"image saved to "+mImageFileName);
+
+                showTakenImage();
+            }
+        }
+    }
+
     private HandlerThread mBackgroundHandlerThread;
     private Handler mBackgroundHandler;
     private ImageButton mRecordImageButton;
+    private ImageButton mCaptureImageButton;
     private File mVideoFolder;
     private String mVideoFileName;
+    private File mImageFolder;
+    private String mImageFileName;
     private boolean mIsRecording = false;
     // maps device rotation codes to degrees
     private static SparseIntArray ORIENTATIONS = new SparseIntArray();
@@ -142,15 +261,19 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         createVideoFolder();
+        createImageFolder();
 
         mMediaRecorder = new MediaRecorder();
 
+        mRootLayout = findViewById(R.id.activity_main);
+        mChronometer = (Chronometer) findViewById(R.id.chronometer);
         mTextureView = (TextureView) findViewById(R.id.textureView);
         mRecordImageButton = (ImageButton) findViewById(R.id.videoOnlineImageButton);
         mRecordImageButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 if (mIsRecording) {
+                    // stop recording
                     mIsRecording = false;
                     mRecordImageButton.setImageResource(R.mipmap.btn_video_online);
                     stopRecording();
@@ -159,6 +282,13 @@ public class MainActivity extends AppCompatActivity {
                     checkWriteStoragePermission();
                     startRecording();
                 }
+            }
+        });
+        mCaptureImageButton = (ImageButton) findViewById(R.id.cameraImageButton);
+        mCaptureImageButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                lockFocus();
             }
         });
     }
@@ -257,7 +387,7 @@ public class MainActivity extends AppCompatActivity {
                 Log.d(LOG_TAG_SETUP_CAMERA, "device orientation: " + ORIENTATIONS.get(deviceOrientation));
                 mTotalRotation = sensorToDeviceRotation(characteristics, deviceOrientation);
                 boolean swapRotation = mTotalRotation == 90 || mTotalRotation == 270; // we are in portrait mode => swap width and height
-                // 90+90=180 => no need to swap, 0+90=90 => camera in landscape, device in portraitn => swap
+                // 90+90=180 => no need to swap, 0+90=90 => camera in landscape, device in portrait => swap
                 int rotatedWidth = width;
                 int rotatedHeight = height;
                 // force enter landscape mode if not already (since camera preview resolution is in landscape mode)
@@ -270,7 +400,12 @@ public class MainActivity extends AppCompatActivity {
                 // choose surface preview size to be closest to the camera preview size while maintaining aspect ratio
                 mPreviewSize = chooseOptimalSize(map.getOutputSizes(SurfaceTexture.class), rotatedWidth, rotatedHeight);
                 mVideoSize = chooseOptimalSize(map.getOutputSizes(MediaRecorder.class), rotatedWidth, rotatedHeight);
+                mImageSize = chooseOptimalSize(map.getOutputSizes(ImageFormat.JPEG), rotatedWidth, rotatedHeight);
                 Log.d(LOG_TAG_SETUP_CAMERA, "preview size: " + mPreviewSize.toString());
+
+                // setup image reader
+                mImageReader = ImageReader.newInstance(mImageSize.getWidth(), mImageSize.getHeight(), ImageFormat.JPEG, 1);
+                mImageReader.setOnImageAvailableListener(mOnImageAvailableListener, mBackgroundHandler);
 
                 // get first rear-facing camera
                 mCameraId = cameraId;
@@ -323,11 +458,14 @@ public class MainActivity extends AppCompatActivity {
             mCaptureRequestBuilder.addTarget(previewSurface);
             // also add record surface
             mCaptureRequestBuilder.addTarget(recordSurface);
-            mCameraDevice.createCaptureSession(Arrays.asList(previewSurface, recordSurface),
+            mCameraDevice.createCaptureSession(Arrays.asList(previewSurface, recordSurface, mImageReader.getSurface()),
                     new CameraCaptureSession.StateCallback() {
                         @Override
                         public void onConfigured(CameraCaptureSession session) {
                             Log.d(LOG_TAG, "camera recording session configured");
+
+                            // TODO should we assign mPreviewSession to session?
+                            mPreviewCaptureSession = session;
 
                             try {
                                 // loop a recording request
@@ -346,6 +484,9 @@ public class MainActivity extends AppCompatActivity {
                     },
                     null);
             mMediaRecorder.start();
+            mChronometer.setBase(SystemClock.elapsedRealtime());
+            mChronometer.setVisibility(View.VISIBLE);
+            mChronometer.start();
         } catch (IOException e) {
             e.printStackTrace();
         } catch (CameraAccessException e) {
@@ -357,6 +498,42 @@ public class MainActivity extends AppCompatActivity {
     private void stopRecording() {
         mMediaRecorder.stop();
         mMediaRecorder.reset();
+        mChronometer.stop();
+        mChronometer.setVisibility(View.INVISIBLE);
+
+        Snackbar fileInfoSnackbar = Snackbar.make(mRootLayout, "Video saved!", Snackbar.LENGTH_LONG);
+        fileInfoSnackbar.setAction("Open", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                Intent intent = new Intent();
+                intent.setAction(Intent.ACTION_VIEW);
+                intent.setDataAndType(Uri.parse(mVideoFileName), "video/mp4");
+                startActivity(intent);
+            }
+        });
+        View view = fileInfoSnackbar.getView();
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) view.getLayoutParams();
+        params.gravity = Gravity.TOP;
+        view.setLayoutParams(params);
+        fileInfoSnackbar.show();
+    }
+
+    private void showTakenImage(){
+        Snackbar fileInfoSnackbar = Snackbar.make(mRootLayout, "Image captured!", Snackbar.LENGTH_LONG);
+        fileInfoSnackbar.setAction("Open", new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                Intent intent = new Intent();
+                intent.setAction(Intent.ACTION_VIEW);
+                intent.setDataAndType(Uri.parse(mImageFileName), "image/*");
+                startActivity(intent);
+            }
+        });
+        View view = fileInfoSnackbar.getView();
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) view.getLayoutParams();
+        params.gravity = Gravity.TOP;
+        view.setLayoutParams(params);
+        fileInfoSnackbar.show();
     }
 
     private void startPreview() {
@@ -372,15 +549,16 @@ public class MainActivity extends AppCompatActivity {
             // set output
             mCaptureRequestBuilder.addTarget(previewSurface);
 
-            mCameraDevice.createCaptureSession(Arrays.asList(previewSurface),
+            mCameraDevice.createCaptureSession(Arrays.asList(previewSurface, mImageReader.getSurface()),
                     new CameraCaptureSession.StateCallback() {
                         @Override
                         public void onConfigured(CameraCaptureSession session) {
                             Log.d(LOG_TAG, "Camera preview configured");
-
+                            // we will use this session to capture image/record videos
+                            mPreviewCaptureSession = session;
                             try {
                                 // loop a preview request
-                                session.setRepeatingRequest(mCaptureRequestBuilder.build(),
+                                mPreviewCaptureSession.setRepeatingRequest(mCaptureRequestBuilder.build(),
                                         null, // callback
                                         mBackgroundHandler); // worker thread handler
                             } catch (CameraAccessException e) {
@@ -394,6 +572,37 @@ public class MainActivity extends AppCompatActivity {
                         }
                     },
                     null);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void startStillCaptureRequest() {
+        Log.d(LOG_TAG,"startStillCaptureRequest()");
+        try {
+            mCaptureRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+            mCaptureRequestBuilder.addTarget(mImageReader.getSurface());
+
+            // fix probable orientation issues
+            mCaptureRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION, mTotalRotation);
+
+            CameraCaptureSession.CaptureCallback stillCaptureCallback = new CameraCaptureSession.CaptureCallback() {
+                @Override
+                public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request, long timestamp, long frameNumber) {
+                    super.onCaptureStarted(session, request, timestamp, frameNumber);
+                    Log.d(LOG_TAG, "stillCaptureCallback.onCaptureStarted()");
+
+                    try {
+                        createImageFileName();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+            };
+
+            mPreviewCaptureSession.capture(mCaptureRequestBuilder.build(), stillCaptureCallback, null);
+            // handler is null since startStillCaptureRequest() gets called in mPreviewCaptureSessionCallback,
+            // which already runs on the background thread
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
@@ -438,19 +647,28 @@ public class MainActivity extends AppCompatActivity {
 
     private static Size chooseOptimalSize(Size[] choices, int width, int height) {
         List<Size> bigEnough = new ArrayList<>();
+        // big enough and matches aspect ratio
+        List<Size> matchesAspectRatio = new ArrayList<>();
         float aspectRatio = height / (float) width;
         for (Size option : choices) {
-            if (option.getHeight() == option.getWidth() * aspectRatio               // matches aspect ratio
-                    && option.getWidth() >= width && option.getHeight() >= height)  // size is equal to or bigger than required
+            if (option.getWidth() >= width && option.getHeight() >= height)  // size is equal to or bigger than required
             {
                 bigEnough.add(option);
+                // check if it also matches aspect ratio
+                if (option.getHeight() == option.getWidth() * aspectRatio) {
+                    matchesAspectRatio.add(option);
+                }
             }
         }
-        if (bigEnough.size() > 0) {
-            // return the smallest of the biggest matching resolutions
+        // first check ones that are big enough and matches the aspect ratio
+        if (matchesAspectRatio.size() > 0) {
+            return Collections.min(matchesAspectRatio, new CompareSizeByArea());
+        } else if (bigEnough.size() > 0) {
+            // none of the big enoug matches aspect ratio
+            // => return the smallest from the bigEnough
             return Collections.min(bigEnough, new CompareSizeByArea());
         } else {
-            // default
+            // return default
             return choices[0];
         }
     }
@@ -470,11 +688,21 @@ public class MainActivity extends AppCompatActivity {
      */
     private void createVideoFolder() {
         File moviesDirectory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES);
-        mVideoFolder = new File(moviesDirectory, VIDEO_FOLDER_NAME);
+        mVideoFolder = new File(moviesDirectory, VIDEO_IMAGE_FOLDER_NAME);
         // check if that folder already exists (previously created)
         if (!mVideoFolder.exists()) {
             // create that folder
             mVideoFolder.mkdirs();
+        }
+    }
+
+    private void createImageFolder() {
+        File moviesDirectory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
+        mImageFolder = new File(moviesDirectory, VIDEO_IMAGE_FOLDER_NAME);
+        // check if that folder already exists (previously created)
+        if (!mImageFolder.exists()) {
+            // create that folder
+            mImageFolder.mkdirs();
         }
     }
 
@@ -484,14 +712,24 @@ public class MainActivity extends AppCompatActivity {
         File videoFile = File.createTempFile(prepend, "mp4", mVideoFolder);
         // FIXME maybe move this assignment somewhere else?
         mVideoFileName = videoFile.getAbsolutePath();
-        Log.d(LOG_TAG,"video file name: "+mVideoFileName);
+        Log.d(LOG_TAG, "video file name: " + mVideoFileName);
         return videoFile;
+    }
+
+    private File createImageFileName() throws IOException {
+        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String prepend = "IMAGE_" + timestamp + "_";
+        File imageFile = File.createTempFile(prepend, "jpg", mImageFolder);
+        mImageFileName = imageFile.getAbsolutePath();
+        Log.d(LOG_TAG, "image file name: " + mImageFileName);
+        return imageFile;
     }
 
     private void checkWriteStoragePermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
                     == PackageManager.PERMISSION_GRANTED) {
+
                 mIsRecording = true;
                 mRecordImageButton.setImageResource(R.mipmap.btn_video_busy);
                 try {
@@ -522,7 +760,7 @@ public class MainActivity extends AppCompatActivity {
      * configure media recorder (inputs, formats, outputs, fps)
      */
     private void setupMediaRecorder() throws IOException {
-        Log.d(LOG_TAG, "ssetting up media recorder");
+        Log.d(LOG_TAG, "setting up media recorder");
         mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
         mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
         mMediaRecorder.setOutputFile(mVideoFileName);
@@ -532,6 +770,18 @@ public class MainActivity extends AppCompatActivity {
         mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
         mMediaRecorder.setOrientationHint(mTotalRotation);
         mMediaRecorder.prepare();
+    }
+
+    private void lockFocus() {
+        mCaptureState = STATE_WAIT_LOCK;
+        // trigger autofocus
+        mCaptureRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
+        try {
+            // send an image capture request
+            mPreviewCaptureSession.capture(mCaptureRequestBuilder.build(), mPreviewCaptureCallback, mBackgroundHandler);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
     }
 
     /**
